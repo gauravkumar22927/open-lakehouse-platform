@@ -1,0 +1,77 @@
+kind create cluster --config infrastructure/kind/cluster.yaml
+
+Verify
+kubectl get nodes
+
+Expected:
+
+NAME                                STATUS
+lakehouse-cluster-control-plane     Ready
+lakehouse-cluster-worker            Ready
+lakehouse-cluster-worker2           Ready
+lakehouse-cluster-worker3           Ready
+
+Step 5 — Verify Labels
+kubectl get nodes --show-labels
+
+You should see
+
+node-role=compute
+
+node-role=storage
+
+node-role=analytics
+Why Node Labels?
+
+This is one of the first Kubernetes concepts interviewers appreciate.
+
+Later we'll tell Kubernetes things like:
+
+Spark Driver
+      ↓
+
+node-role=compute
+
+or
+
+MinIO
+
+↓
+
+node-role=storage
+
+using nodeSelector or node affinity. That lets us control where workloads run.
+
+Step 6 — Create Namespaces
+
+Create:
+
+infrastructure/scripts/create-namespaces.sh
+#!/bin/bash
+
+kubectl create namespace storage
+kubectl create namespace compute
+kubectl create namespace analytics
+kubectl create namespace monitoring
+
+Run:
+
+chmod +x infrastructure/scripts/create-namespaces.sh
+
+./infrastructure/scripts/create-namespaces.sh
+
+Verify:
+
+kubectl get ns
+
+Expected:
+
+analytics
+compute
+default
+kube-system
+monitoring
+storage
+
+----------------------------
+

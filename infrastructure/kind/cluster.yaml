@@ -1,0 +1,23 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: lakehouse-cluster
+
+networking:
+  apiServerAddress: "127.0.0.1"
+  apiServerPort: 6443
+
+nodes:
+
+- role: control-plane
+
+- role: worker
+  labels:
+    node-role: compute
+
+- role: worker
+  labels:
+    node-role: storage
+
+- role: worker
+  labels:
+    node-role: analytics
