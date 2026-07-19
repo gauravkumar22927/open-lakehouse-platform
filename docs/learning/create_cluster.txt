@@ -1,77 +1,495 @@
-kind create cluster --config infrastructure/kind/cluster.yaml
+Open Lakehouse Platform - Kind Cluster Runbook
+==============================================
 
-Verify
-kubectl get nodes
+Objective
+---------
 
-Expected:
+Build a production-style open lakehouse on a local Kind Kubernetes cluster.
+The stack is intentionally visible: Docker images, Kubernetes pods, JVM jars,
+Spark configuration, Hive Metastore, PostgreSQL, MinIO object storage, and
+Jupyter are all managed directly.
 
-NAME                                STATUS
-lakehouse-cluster-control-plane     Ready
-lakehouse-cluster-worker            Ready
-lakehouse-cluster-worker2           Ready
-lakehouse-cluster-worker3           Ready
+This project is useful for understanding what managed platforms such as
+Microsoft Fabric and Databricks hide behind their user interfaces.
 
-Step 5 — Verify Labels
-kubectl get nodes --show-labels
 
-You should see
+Current Architecture
+--------------------
 
-node-role=compute
+Host:
 
-node-role=storage
+  Ubuntu/Linux
+    -> Docker Engine
+    -> Kind node containers
+    -> Kubernetes
+    -> Pods
 
-node-role=analytics
-Why Node Labels?
+Services:
 
-This is one of the first Kubernetes concepts interviewers appreciate.
+  MinIO
+    S3-compatible object storage. Stores lakehouse data and Delta logs.
 
-Later we'll tell Kubernetes things like:
+  PostgreSQL
+    Backing database for Hive Metastore metadata.
 
-Spark Driver
-      ↓
+  Hive Metastore 4.0.1
+    Catalog service exposed over Thrift on port 9083.
+    Runtime Hadoop is upgraded to 3.4.1 to match Spark.
 
-node-role=compute
+  Spark 4.0.1
+    SQL engine configured for Hive catalog, Delta Lake, and S3A access.
 
-or
+  Jupyter
+    Notebook environment for interactive experiments.
 
-MinIO
+Namespaces:
 
-↓
+  storage     MinIO
+  metadata    PostgreSQL, Hive Metastore, Spark shell pod
+  compute     Jupyter
+  analytics   Reserved for future analytical workloads
+  monitoring  Reserved for observability
 
-node-role=storage
 
-using nodeSelector or node affinity. That lets us control where workloads run.
+Repository Layout
+-----------------
 
-Step 6 — Create Namespaces
+  deploy/
+    kind/                  Kind cluster definition
+    helm/                  Helm values
+    kubernetes/            Kubernetes manifests
 
-Create:
+  images/
+    hive-metastore/        Hive Metastore custom image
+    spark/                 Spark custom image and spark-defaults.conf
+    jupyter/               Jupyter custom image
 
-infrastructure/scripts/create-namespaces.sh
-#!/bin/bash
+  scripts/
+    create-namespaces.sh   Idempotent namespace creation
+    build-images.sh        Build local Docker images
+    load-images-kind.sh    Load local images into Kind nodes
+    deploy-platform.sh     Deploy Helm charts and Kubernetes workloads
+    restart-workloads.sh   Restart local image based deployments
+    smoke-test.sh          End-to-end Delta Lake smoke test
 
-kubectl create namespace storage
-kubectl create namespace compute
-kubectl create namespace analytics
-kubectl create namespace monitoring
+  docs/
+    learning/              Learning notes and runbooks
 
-Run:
 
-chmod +x infrastructure/scripts/create-namespaces.sh
+Prerequisites
+-------------
 
-./infrastructure/scripts/create-namespaces.sh
+Install these tools on the host:
+
+  docker
+  kind
+  kubectl
+  helm
 
 Verify:
 
-kubectl get ns
+  docker version
+  kind version
+  kubectl version --client
+  helm version
+
+
+1. Create The Kind Cluster
+--------------------------
+
+Create the cluster:
+
+  kind create cluster --config deploy/kind/cluster.yaml
+
+Verify nodes:
+
+  kubectl get nodes
+
+Expected node names:
+
+  lakehouse-cluster-control-plane
+  lakehouse-cluster-worker
+  lakehouse-cluster-worker2
+  lakehouse-cluster-worker3
+
+Verify labels:
+
+  kubectl get nodes --show-labels
+
+Expected custom labels:
+
+  node-role=compute
+  node-role=storage
+  node-role=analytics
+
+Why labels matter:
+
+  Later, workloads can be pinned to specific node groups with nodeSelector or
+  node affinity. For example, object storage can run on storage nodes, Spark
+  workloads can run on compute nodes, and serving/query workloads can run on
+  analytics nodes.
+
+
+2. Create Namespaces
+--------------------
+
+Run:
+
+  ./scripts/create-namespaces.sh
+
+Equivalent raw commands:
+
+  kubectl create namespace storage --dry-run=client -o yaml | kubectl apply -f -
+  kubectl create namespace metadata --dry-run=client -o yaml | kubectl apply -f -
+  kubectl create namespace compute --dry-run=client -o yaml | kubectl apply -f -
+  kubectl create namespace analytics --dry-run=client -o yaml | kubectl apply -f -
+  kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -
+
+Verify:
+
+  kubectl get ns
+
+
+3. Build Local Images
+---------------------
+
+Build all custom images:
+
+  ./scripts/build-images.sh
+
+Equivalent raw commands:
+
+  docker build -t lakehouse/hive-metastore:1.0 images/hive-metastore
+  docker build -t lakehouse/spark:1.0 images/spark
+  docker build -t lakehouse/jupyter:1.0 images/jupyter
+
+Important image details:
+
+  Hive Metastore image:
+    Base image: apache/hive:4.0.1
+    Hadoop runtime: 3.4.1
+    S3A jars: Hadoop 3.4.1 bundled hadoop-aws and AWS SDK bundle
+    PostgreSQL JDBC: postgresql-42.7.7.jar
+
+  Spark image:
+    Base image: apache/spark:4.0.1
+    Hive client jars: Hive 4 client jars copied into /opt/hive4/lib
+    S3A jars: copied from the Hive/Hadoop 3.4.1 runtime image
+    Delta jars: delta-spark_2.13-4.0.0.jar and delta-storage-4.0.0.jar
+
+Why this matters:
+
+  Spark 4.0.1 uses Hadoop 3.4.1 APIs. Hive's stock image can include an older
+  Hadoop runtime. Mixing hadoop-aws 3.4.1 with Hadoop 3.3.x causes errors such
+  as:
+
+    NoClassDefFoundError: org/apache/hadoop/fs/BulkDelete
+
+  The custom Hive image avoids that by replacing the Hadoop runtime with 3.4.1.
+
+  Spark also needs Hive 4 metastore client jars when talking to Hive Metastore
+  4. Without that, table operations can fail with:
+
+    Invalid method name: 'get_table'
+
+
+4. Load Images Into Kind
+------------------------
+
+Kind nodes do not automatically see images from the host Docker daemon.
+Load them explicitly:
+
+  ./scripts/load-images-kind.sh
+
+Equivalent raw commands:
+
+  kind load docker-image lakehouse/hive-metastore:1.0 --name lakehouse-cluster
+  kind load docker-image lakehouse/spark:1.0 --name lakehouse-cluster
+  kind load docker-image lakehouse/jupyter:1.0 --name lakehouse-cluster
+
+
+5. Deploy The Platform
+----------------------
+
+Deploy MinIO, PostgreSQL, Hive Metastore, Spark, and Jupyter:
+
+  ./scripts/deploy-platform.sh
+
+Equivalent raw commands:
+
+  helm repo add minio https://charts.min.io/
+  helm repo add bitnami https://charts.bitnami.com/bitnami
+  helm repo update
+
+  helm upgrade --install minio minio/minio \
+    --namespace storage \
+    --values deploy/helm/minio/values.yaml
+
+  helm upgrade --install postgres bitnami/postgresql \
+    --namespace metadata \
+    --set auth.username=hive \
+    --set auth.password=hivepassword \
+    --set auth.database=metastore \
+    --set primary.persistence.size=5Gi
+
+  kubectl apply -f deploy/kubernetes/hive-metastore
+  kubectl apply -f deploy/kubernetes/spark
+  kubectl apply -f deploy/kubernetes/jupyter
+
+Verify:
+
+  kubectl get pods -n storage
+  kubectl get pods -n metadata
+  kubectl get pods -n compute
 
 Expected:
 
-analytics
-compute
-default
-kube-system
-monitoring
-storage
+  storage:
+    minio pod running
 
+  metadata:
+    postgres-postgresql-0 running
+    hive-metastore running
+    spark running
+
+  compute:
+    jupyter running
+
+
+6. Verify Hive Metastore
+------------------------
+
+Check logs:
+
+  kubectl logs -n metadata deployment/hive-metastore --tail=100
+
+Expected schema message on restart:
+
+  Hive Metastore schema already exists.
+  Starting Hive Metastore...
+
+Verify Hadoop version inside Hive:
+
+  kubectl exec -n metadata deployment/hive-metastore -- /opt/hadoop/bin/hadoop version
+
+Expected:
+
+  Hadoop 3.4.1
+
+
+7. Prepare MinIO Bucket
+-----------------------
+
+Create the `lakehouse` bucket:
+
+  kubectl exec -n storage deployment/minio -- sh -c \
+    'mc alias set local http://localhost:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null && mc mb --ignore-existing local/lakehouse'
+
+List buckets:
+
+  kubectl exec -n storage deployment/minio -- sh -c \
+    'mc alias set local http://localhost:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null && mc ls local'
+
+MinIO credentials used by this project:
+
+  access key: admin
+  secret key: admin12345
+
+These are configured in:
+
+  deploy/helm/minio/values.yaml
+  images/hive-metastore/hive-site.xml
+  images/spark/conf/spark-defaults.conf
+
+
+8. Run Spark SQL
+----------------
+
+Open an interactive Spark SQL shell:
+
+  kubectl exec -it -n metadata deployment/spark -- /opt/spark/bin/spark-sql
+
+Or run a command directly:
+
+  kubectl exec -n metadata deployment/spark -- /opt/spark/bin/spark-sql -e "SHOW DATABASES;"
+
+Create the lakehouse database:
+
+  kubectl exec -n metadata deployment/spark -- /opt/spark/bin/spark-sql -e \
+    "CREATE DATABASE IF NOT EXISTS lakehouse LOCATION 's3a://lakehouse/warehouse'; SHOW DATABASES;"
+
+
+9. Run End-To-End Smoke Test
 ----------------------------
 
+Run:
+
+  ./scripts/smoke-test.sh
+
+Expected query output:
+
+  1    bronze
+  2    silver
+
+The smoke test does this:
+
+  1. Creates the `lakehouse` bucket if missing.
+  2. Creates database `lakehouse` at `s3a://lakehouse/warehouse`.
+  3. Drops and recreates Delta table `lakehouse.smoke_delta`.
+  4. Inserts two rows.
+  5. Reads the table back.
+
+Verify files in MinIO:
+
+  kubectl exec -n storage deployment/minio -- sh -c \
+    'mc alias set local http://localhost:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null && mc ls --recursive local/lakehouse/warehouse | head -n 80'
+
+Expected object patterns:
+
+  smoke_delta/_delta_log/00000000000000000000.json
+  smoke_delta/_delta_log/00000000000000000001.json
+  smoke_delta/part-*.snappy.parquet
+
+
+10. Access Jupyter
+------------------
+
+Port-forward:
+
+  kubectl port-forward -n compute deployment/jupyter 8888:8888
+
+Open:
+
+  http://localhost:8888
+
+The current deployment disables the notebook token/password for local learning.
+Do not use that setting for shared or production environments.
+
+
+11. Access MinIO Console
+------------------------
+
+Port-forward:
+
+  kubectl port-forward -n storage svc/minio-console 9001:9001
+
+Open:
+
+  http://localhost:9001
+
+Login:
+
+  user: admin
+  password: admin12345
+
+
+12. Rebuild After Code Changes
+------------------------------
+
+After changing Dockerfiles or image config:
+
+  ./scripts/build-images.sh
+  ./scripts/load-images-kind.sh
+  ./scripts/restart-workloads.sh
+
+For a single component:
+
+  docker build -t lakehouse/hive-metastore:1.0 images/hive-metastore
+  kind load docker-image lakehouse/hive-metastore:1.0 --name lakehouse-cluster
+  kubectl rollout restart deployment/hive-metastore -n metadata
+  kubectl rollout status deployment/hive-metastore -n metadata --timeout=180s
+
+  docker build -t lakehouse/spark:1.0 images/spark
+  kind load docker-image lakehouse/spark:1.0 --name lakehouse-cluster
+  kubectl rollout restart deployment/spark -n metadata
+  kubectl rollout status deployment/spark -n metadata --timeout=180s
+
+
+13. Troubleshooting
+-------------------
+
+Problem:
+
+  NoClassDefFoundError: org/apache/hadoop/fs/BulkDelete
+
+Cause:
+
+  hadoop-aws 3.4.1 is running with an older Hadoop runtime.
+
+Fix:
+
+  Rebuild and redeploy the custom Hive image:
+
+    docker build -t lakehouse/hive-metastore:1.0 images/hive-metastore
+    kind load docker-image lakehouse/hive-metastore:1.0 --name lakehouse-cluster
+    kubectl rollout restart deployment/hive-metastore -n metadata
+
+
+Problem:
+
+  Invalid method name: 'get_table'
+
+Cause:
+
+  Spark is using Hive 2.3 metastore client jars against Hive Metastore 4.
+
+Fix:
+
+  Use the Spark image in this repository. It includes Hive 4 client jars and:
+
+    spark.sql.hive.metastore.version=4.0.0
+    spark.sql.hive.metastore.jars=/opt/hive4/lib/*
+
+
+Problem:
+
+  S3A authentication fails.
+
+Cause:
+
+  MinIO credentials differ between Helm values, Hive config, and Spark config.
+
+Fix:
+
+  Keep these aligned:
+
+    deploy/helm/minio/values.yaml
+    images/hive-metastore/hive-site.xml
+    images/spark/conf/spark-defaults.conf
+
+
+Problem:
+
+  Kind pod cannot pull local image.
+
+Cause:
+
+  Local image was built on the host but not loaded into Kind.
+
+Fix:
+
+  kind load docker-image lakehouse/spark:1.0 --name lakehouse-cluster
+
+
+14. Clean Up
+------------
+
+Delete the full cluster:
+
+  kind delete cluster --name lakehouse-cluster
+
+Delete local images if needed:
+
+  docker rmi lakehouse/hive-metastore:1.0 lakehouse/spark:1.0 lakehouse/jupyter:1.0
+
+
+Next Project Milestones
+-----------------------
+
+1. Bronze ingestion into Delta tables.
+2. Silver cleansing and schema evolution.
+3. Gold aggregates for serving.
+4. Airflow or Argo Workflows orchestration.
+5. Prometheus/Grafana monitoring.
+6. Data quality checks.
+7. Governance concepts: catalog ownership, lineage, and access controls.

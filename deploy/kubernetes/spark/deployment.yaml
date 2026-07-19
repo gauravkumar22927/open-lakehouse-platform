@@ -1,0 +1,26 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spark
+  namespace: metadata
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: spark
+  template:
+    metadata:
+      labels:
+        app: spark
+    spec:
+      containers:
+        - name: spark
+          image: lakehouse/spark:1.0
+          imagePullPolicy: Never
+          command:
+            - /opt/spark/bin/spark-shell
+          stdin: true
+          tty: true
+          env:
+            - name: SPARK_NO_DAEMONIZE
+              value: "true"

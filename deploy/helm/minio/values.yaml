@@ -1,0 +1,15 @@
+mode: standalone
+
+replicas: 1
+
+rootUser: admin
+rootPassword: admin12345
+
+persistence:
+  enabled: true
+  size: 20Gi
+
+resources:
+  requests:
+    memory: 2Gi
+    cpu: 500m

@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jupyter
+  namespace: compute
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: jupyter
+
+  template:
+    metadata:
+      labels:
+        app: jupyter
+
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 100
+        fsGroup: 100
+
+      containers:
+        - name: jupyter
+          image: lakehouse/jupyter:1.0
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - containerPort: 8888
+
+          command:
+            - start-notebook.py
+
+          args:
+            - --ServerApp.ip=0.0.0.0
+            - --ServerApp.port=8888
+            - --ServerApp.token=
+            - --ServerApp.password=
+
+          workingDir: /home/jovyan
+
+          volumeMounts:
+            - name: workspace
+              mountPath: /home/jovyan
+
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+
+      volumes:
+        - name: workspace
+          emptyDir: {}
